@@ -7,11 +7,21 @@ A rewrite of the [generate_emu_config](https://gitlab.com/Mr_Goldberg/goldberg_e
 * Automatically find the IDs of top reviewers and use them to query for the stats/achievements schema
 * Extend built-in owners IDs by adding them to a file called `top_owners_ids.txt`, each ID on a separate line
 * Download various media assets for each app: backgrounds, icons, screenshots, inventory items images, ...
+* Login with an account name plus `--refreshtoken`/`--accesstoken`, no password or Steam Guard prompt needed (tokens are not saved to disk)
+* If no appids are given, all apps from the licenses owned by the account are loaded
 
 ## Example
 * console.gen.emu.cfg
   ```shell
   console.gen.emu.cfg 420 730 227300 -v --icons --imgs --scrn --thumbs --vid --invicons --inviconslarge
+  ```
+* console.gen.emu.cfg, login with account name and token
+  ```shell
+  console.gen.emu.cfg 420 730 -u myaccount --refreshtoken <token>
+  ```
+* console.gen.emu.cfg, all owned apps (no appids)
+  ```shell
+  console.gen.emu.cfg -u myaccount --refreshtoken <token>
   ```
 * console.vdf.parser
   ```shell

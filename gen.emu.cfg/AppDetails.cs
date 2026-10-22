@@ -1,5 +1,6 @@
 ﻿using SteamKit2;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -20,6 +21,67 @@ public class AppDetails
   private static AppDetails? _instance;
   public static AppDetails Instance => _instance ??= new AppDetails();
 
+  readonly ConcurrentDictionary<uint, ulong> appAccessTokens = new();
+
+  /// <summary>
+  /// Fetches PICS access tokens for the given apps in bulk and caches them.
+  /// </summary>
+  public async Task PrefetchAppAccessTokensAsync(IEnumerable<uint> appids)
+  {
+    var apps = Client.Instance.GetSteamClient.GetHandler<SteamApps>()
+      ?? throw new InvalidOperationException($"Null apps instance");
+
+    foreach (var batch in appids.Where(id => id != 0 && !appAccessTokens.ContainsKey(id)).Distinct().Chunk(1000))
+    {
+      try
+      {
+        var res = await apps.PICSGetAccessTokens(batch, []).ToTask().ConfigureAwait(false);
+        foreach (var (id, token) in res.AppTokens)
+        {
+          appAccessTokens[id] = token;
+        }
+        foreach (var id in res.AppTokensDenied)
+        {
+          appAccessTokens.TryAdd(id, 0);
+        }
+      }
+      catch (Exception ex)
+      {
+        Log.Instance.Write(Log.Kind.Debug, $"Failed to prefetch app access tokens: {ex.Message}");
+      }
+    }
+  }
+
+  async Task<ulong> GetAppAccessTokenAsync(uint appid)
+  {
+    if (appAccessTokens.TryGetValue(appid, out var cached))
+    {
+      return cached;
+    }
+
+    ulong token = 0;
+    try
+    {
+      var apps = Client.Instance.GetSteamClient.GetHandler<SteamApps>();
+      if (apps is not null)
+      {
+        var res = await apps.PICSGetAccessTokens(appid, null).ToTask().ConfigureAwait(false);
+        if (!res.AppTokens.TryGetValue(appid, out token))
+        {
+          token = 0;
+        }
+      }
+    }
+    catch (Exception ex)
+    {
+      // not fatal, we continue without a token
+      Log.Instance.Write(Log.Kind.Debug, $"Failed to get access token for appid {appid}: {ex.Message}");
+    }
+
+    appAccessTokens[appid] = token;
+    return token;
+  }
+
   public async Task<JsonObject> GetProductInfoAsync(uint appid)
   {
     if (appid == 0)
@@ -33,7 +95,9 @@ public class AppDetails
       throw new InvalidOperationException($"Null apps instance");
     }
 
-    var resApps = await apps.PICSGetProductInfo(new SteamApps.PICSRequest(appid), null).ToTask().ConfigureAwait(false);
+    var accessToken = await GetAppAccessTokenAsync(appid).ConfigureAwait(false);
+
+    var resApps = await apps.PICSGetProductInfo(new SteamApps.PICSRequest(appid, accessToken), null).ToTask().ConfigureAwait(false);
     if (resApps is null || resApps.Failed || !resApps.Complete)
     {
       throw new InvalidOperationException($"Failed to get product info for appid {appid}");

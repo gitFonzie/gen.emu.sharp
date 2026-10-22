@@ -22,6 +22,14 @@ public class ToolArgs
       HelpText = "login password")]
     public string? Password { get; private set; } = null;
 
+    [Option("accesstoken", Default = null, Required = false,
+      HelpText = "login access token, used together with -u (account name) to skip further authentication, not saved to disk")]
+    public string? AccessToken { get; private set; } = null;
+
+    [Option("refreshtoken", Default = null, Required = false,
+      HelpText = "login refresh token, used together with -u (account name) to skip further authentication, not saved to disk")]
+    public string? RefreshToken { get; private set; } = null;
+
     [Option("anon", Default = false, Required = false,
       HelpText = "login as an anonymous account, these have very limited access and cannot get all app details")]
     public bool AnonLogin { get; private set; }

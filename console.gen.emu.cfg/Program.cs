@@ -65,11 +65,6 @@ if (ToolArgs.Instance.GetOptions.VerboseLogging)
   Log.Instance.Write(Log.Kind.Debug, $"verbose logging is on!");
 }
 
-if (ToolArgs.Instance.GetAppIds.Count == 0)
-{
-  throw new ArgumentException($"No valid appids were provided");
-}
-
 bool isRestoreFromBackup = ToolArgs.Instance.GetOptions.RestoreFromBackup || ToolArgs.Instance.GetOptions.IsOfflineMode;
 
 string baseFolder = Utils.GetExeDir(ToolArgs.Instance.GetOptions.UseRelativeOutputDir);
@@ -79,11 +74,28 @@ if (!ToolArgs.Instance.GetOptions.IsOfflineMode)
   await OnlineLoginAsync().ConfigureAwait(false);
 }
 
+IReadOnlyCollection<uint> appIds = ToolArgs.Instance.GetAppIds;
+if (appIds.Count == 0)
+{
+  // no appids were given, use everything the account owns
+  if (ToolArgs.Instance.GetOptions.IsOfflineMode || ToolArgs.Instance.GetOptions.AnonLogin || isRestoreFromBackup)
+  {
+    throw new ArgumentException($"No valid appids were provided");
+  }
+
+  Log.Instance.Write(Log.Kind.Info, "No appids were provided, loading all owned apps");
+  appIds = await OwnedApps.GetOwnedAppIdsAsync().ConfigureAwait(false);
+  if (appIds.Count == 0)
+  {
+    throw new InvalidOperationException("No owned apps were found for this account");
+  }
+}
+
 TopOwners.Instance.Init(baseFolder);
 
 var backupFolder = Path.Combine(baseFolder, BACKUPS_FOLDER_NAME);
 
-foreach (var appid in ToolArgs.Instance.GetAppIds)
+foreach (var appid in appIds)
 {
   var filepath = Path.Combine(
     backupFolder,
@@ -142,7 +154,7 @@ foreach (var appid in ToolArgs.Instance.GetAppIds)
   }
 
   // TODO EXTRA ARGS
-  await GeneratorsRunner.Instance.RunForAppAsync(appModel, Path.Combine(baseFolder, "generated", $"{appModel.Product.NameOnDisk}-{appModel.AppId}"), args, generators).ConfigureAwait(false);
+  await GeneratorsRunner.Instance.RunForAppAsync(appModel, Path.Combine(baseFolder, "generated", appModel.AppId.ToString(CultureInfo.InvariantCulture)), args, generators).ConfigureAwait(false);
 
   Log.Instance.EndSteps(lglvapp, $"done");
 }
@@ -166,7 +178,7 @@ async Task OnlineLoginAsync()
   // otherwise we won't get any callbacks/callresults
   UserStatsCustomHandler.RegisterHandler(Client.Instance.GetSteamClient);
 
-  var res = await Auth.Instance.LoginAsync(ToolArgs.Instance.GetOptions.Username, ToolArgs.Instance.GetOptions.Password, ToolArgs.Instance.GetOptions.AnonLogin).ConfigureAwait(false);
+  var res = await Auth.Instance.LoginAsync(ToolArgs.Instance.GetOptions.Username, ToolArgs.Instance.GetOptions.Password, ToolArgs.Instance.GetOptions.AnonLogin, ToolArgs.Instance.GetOptions.AccessToken, ToolArgs.Instance.GetOptions.RefreshToken).ConfigureAwait(false);
 
   Log.Instance.Write(Log.Kind.Info, "Connected!");
 

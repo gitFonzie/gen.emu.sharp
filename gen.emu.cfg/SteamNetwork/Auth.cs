@@ -55,6 +55,12 @@ public class Auth
   string? storedAccountName;
   string? storedGuardData;
 
+  // tokens passed explicitly by the caller, these are never read from/written to disk
+  string? cliAccessToken;
+  string? cliRefreshToken;
+  bool UseCliTokens => !string.IsNullOrEmpty(cliAccessToken) || !string.IsNullOrEmpty(cliRefreshToken);
+
+  TaskCompletionSource<IReadOnlyList<uint>> licensesTcs = new();
 
   public SteamUser GetSteamUser => isRunning ? steamUser : throw new InvalidOperationException("Not logged in");
 
@@ -73,11 +79,16 @@ public class Auth
     TryReadCredFile(CRED_FILENAME_GUARD_DATA, out storedGuardData);
   }
 
-  public async Task<SteamUser.LoggedOnCallback> LoginAsync(string? username, string? password, bool anon = false)
+  public async Task<SteamUser.LoggedOnCallback> LoginAsync(string? username, string? password, bool anon = false, string? accessToken = null, string? refreshToken = null)
   {
     if (isRunning)
     {
       return await activeLogin.Task.ConfigureAwait(false);
+    }
+
+    if (!anon && (!string.IsNullOrEmpty(accessToken) || !string.IsNullOrEmpty(refreshToken)) && string.IsNullOrEmpty(username))
+    {
+      throw new InvalidOperationException("An account name (-u) is required when using --accesstoken/--refreshtoken");
     }
 
     ResetState();
@@ -88,6 +99,8 @@ public class Auth
     this.username = username;
     this.password = password;
     anonUser = anon;
+    cliAccessToken = anon ? null : accessToken;
+    cliRefreshToken = anon ? null : refreshToken;
 
     // get the steamuser handler, which is used for logging on after successfully connecting
     steamUser = Client.Instance.GetSteamClient.GetHandler<SteamUser>() ?? throw new NullReferenceException("Couldn't get SteamUser instance");
@@ -112,11 +125,33 @@ public class Auth
 
     Client.Instance.GetCallbackManager.Subscribe<SteamUser.LoggedOnCallback>(OnLoggedOn);
     Client.Instance.GetCallbackManager.Subscribe<SteamUser.LoggedOffCallback>(OnLoggedOff);
+    Client.Instance.GetCallbackManager.Subscribe<SteamApps.LicenseListCallback>(OnLicenseList);
 
     // initiate the connection
     Client.Instance.GetSteamClient.Connect();
 
     return await activeLogin.Task.ConfigureAwait(false);
+  }
+
+  /// <summary>
+  /// Gets the package ids of all licenses owned by the logged in account.
+  /// Returns an empty list for anonymous logins.
+  /// </summary>
+  public async Task<IReadOnlyList<uint>> GetOwnedPackageIdsAsync(TimeSpan? timeout = null)
+  {
+    if (!isRunning || anonUser)
+    {
+      return [];
+    }
+
+    var task = licensesTcs.Task;
+    var completed = await Task.WhenAny(task, Task.Delay(timeout ?? TimeSpan.FromSeconds(30))).ConfigureAwait(false);
+    if (completed != task)
+    {
+      throw new TimeoutException("Timed out waiting for the license list");
+    }
+
+    return await task.ConfigureAwait(false);
   }
 
   public Task ShutdownAsync()
@@ -138,6 +173,10 @@ public class Auth
   {
     activeLogin = new();
     activeDisconnect = new();
+    licensesTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    cliAccessToken = null;
+    cliRefreshToken = null;
 
     isRunning = false;
     attemptingConnection = false;
@@ -389,6 +428,19 @@ public class Auth
 
   async Task RealLogin()
   {
+    if (UseCliTokens)
+    {
+      // account name + token were provided, no further authentication is needed
+      // note: SteamKit expects a refresh token in AccessToken, prefer it over the access token
+      steamUser.LogOn(new SteamUser.LogOnDetails
+      {
+        Username = username,
+        AccessToken = !string.IsNullOrEmpty(cliRefreshToken) ? cliRefreshToken : cliAccessToken,
+        ShouldRememberPassword = PERSISTENT_LOGIN,
+      });
+      return;
+    }
+
     if (string.IsNullOrEmpty(storedRefreshToken)) // if we don't have a previous refresh token to use for later logins
     {
       try
@@ -441,6 +493,16 @@ public class Auth
 
     if (callback.Result != EResult.OK)
     {
+      if (UseCliTokens)
+      {
+        // provided tokens are not retried, they won't become valid by trying again
+        activeLogin.TrySetException(new InvalidOperationException($"Unable to login with the provided token, result={callback.Result}, extended result={callback.ExtendedResult}"));
+        attemptingConnection = false;
+        loginAttempts = MAX_LOGIN_ATTEMPTS;
+        Client.Instance.GetSteamClient.Disconnect();
+        return;
+      }
+
       if (callback.Result == EResult.TryAnotherCM) // timeout for 2FA/email auth
       {
         activeLogin.TrySetException(new InvalidOperationException($"Unable to login (timeout), result={callback.Result}, extended result={callback.ExtendedResult}"));
@@ -460,6 +522,17 @@ public class Auth
     Client.Instance.TryWriteLastCellId(callback.CellID);
 
     activeLogin.TrySetResult(callback);
+  }
+
+  void OnLicenseList(SteamApps.LicenseListCallback callback)
+  {
+    if (callback.Result != EResult.OK)
+    {
+      licensesTcs.TrySetException(new InvalidOperationException($"Failed to get license list, result={callback.Result}"));
+      return;
+    }
+
+    licensesTcs.TrySetResult(callback.LicenseList.Select(l => l.PackageID).Distinct().ToList());
   }
 
   void OnLoggedOff(SteamUser.LoggedOffCallback callback)
